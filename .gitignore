@@ -1,11 +1,3 @@
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
 .env
-.venv
-env/
-venv/
-ENV/
-.vscode/
-.idea/
