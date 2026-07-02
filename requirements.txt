@@ -6,3 +6,4 @@ opencv-python-headless
 deep-translator
 gTTS
 python-multipart
+gdown

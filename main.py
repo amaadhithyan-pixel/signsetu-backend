@@ -8,6 +8,8 @@ from deep_translator import GoogleTranslator
 from gtts import gTTS
 import base64
 import io
+import os
+import gdown
 
 app = FastAPI()
 
@@ -18,8 +20,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Download model from Google Drive if not present
+MODEL_PATH = "signsetu_best.h5"
+FILE_ID = "1PYSymFsN3HQd4qr_Ob1Loj-RVgGysV8s"
+
+if not os.path.exists(MODEL_PATH):
+    print("Downloading model from Google Drive...")
+    gdown.download(f"https://drive.google.com/uc?id={FILE_ID}", MODEL_PATH, quiet=False)
+    print("Model downloaded ✅")
+
 print("Loading model...")
-model = tf.keras.models.load_model('signsetu_best.h5')
+model = tf.keras.models.load_model(MODEL_PATH)
 with open('reverse_label_map.json') as f:
     reverse_map = json.load(f)
 print("Model loaded ✅")
