@@ -3,6 +3,7 @@ uvicorn
 tensorflow
 numpy
 opencv-python-headless
+mediapipe
 deep-translator
 gTTS
 python-multipart
