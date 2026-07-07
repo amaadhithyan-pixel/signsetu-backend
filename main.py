@@ -1,16 +1,15 @@
 from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-import tensorflow as tf
 import numpy as np
-import json
 import cv2
 import mediapipe as mp
+from PIL import Image
+import torch
+from transformers import AutoImageProcessor, SiglipForImageClassification
 from deep_translator import GoogleTranslator
 from gtts import gTTS
 import base64
 import io
-import os
-import gdown
 
 app = FastAPI()
 
@@ -21,22 +20,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Download model from Google Drive if not present
-MODEL_PATH = "signsetu_best.h5"
-FILE_ID = "1PYSymFsN3HQd4qr_Ob1Loj-RVgGysV8s"
-
-if not os.path.exists(MODEL_PATH):
-    print("Downloading model from Google Drive...")
-    gdown.download(f"https://drive.google.com/uc?id={FILE_ID}", MODEL_PATH, quiet=False)
-    print("Model downloaded ✅")
-
-print("Loading model...")
-model = tf.keras.models.load_model(MODEL_PATH)
-with open('reverse_label_map.json') as f:
-    reverse_map = json.load(f)
+# ── Load Hugging Face model ──────────────────────────────────────────
+MODEL_NAME = "prithivMLmods/Alphabet-Sign-Language-Detection"
+print("Loading ASL model from Hugging Face...")
+processor = AutoImageProcessor.from_pretrained(MODEL_NAME)
+model     = SiglipForImageClassification.from_pretrained(MODEL_NAME)
+model.eval()
 print("Model loaded ✅")
 
-# MediaPipe hands — runs once at startup, reused for every request
+LABELS = {
+    "0":"A","1":"B","2":"C","3":"D","4":"E","5":"F","6":"G","7":"H",
+    "8":"I","9":"J","10":"K","11":"L","12":"M","13":"N","14":"O","15":"P",
+    "16":"Q","17":"R","18":"S","19":"T","20":"U","21":"V","22":"W","23":"X",
+    "24":"Y","25":"Z"
+}
+
+# ── MediaPipe hand crop ──────────────────────────────────────────────
 mp_hands = mp.solutions.hands
 hands_detector = mp_hands.Hands(
     static_image_mode=True,
@@ -45,35 +44,21 @@ hands_detector = mp_hands.Hands(
 )
 print("MediaPipe loaded ✅")
 
-IMG_SIZE = 64
-PADDING = 0.20   # 20% padding around the hand bounding box
-
+PADDING = 0.20
 
 def crop_hand(img_rgb):
-    """
-    Detect hand landmarks, compute bounding box, return cropped hand image.
-    Returns None if no hand found.
-    """
     h, w = img_rgb.shape[:2]
-    results = hands_detector.process(img_rgb)
-
-    if not results.multi_hand_landmarks:
+    res = hands_detector.process(img_rgb)
+    if not res.multi_hand_landmarks:
         return None
-
-    lm = results.multi_hand_landmarks[0].landmark
-
-    xs = [p.x for p in lm]
-    ys = [p.y for p in lm]
-
-    x_min = max(0, int((min(xs) - PADDING) * w))
-    x_max = min(w, int((max(xs) + PADDING) * w))
-    y_min = max(0, int((min(ys) - PADDING) * h))
-    y_max = min(h, int((max(ys) + PADDING) * h))
-
-    cropped = img_rgb[y_min:y_max, x_min:x_max]
-    if cropped.size == 0:
-        return None
-    return cropped
+    lm = res.multi_hand_landmarks[0].landmark
+    xs = [p.x for p in lm]; ys = [p.y for p in lm]
+    x1 = max(0, int((min(xs) - PADDING) * w))
+    x2 = min(w, int((max(xs) + PADDING) * w))
+    y1 = max(0, int((min(ys) - PADDING) * h))
+    y2 = min(h, int((max(ys) + PADDING) * h))
+    crop = img_rgb[y1:y2, x1:x2]
+    return crop if crop.size > 0 else None
 
 
 @app.get("/")
@@ -87,41 +72,32 @@ async def predict(
     target_lang: str = "ta"
 ):
     contents = await file.read()
-    nparr = np.frombuffer(contents, np.uint8)
+    nparr   = np.frombuffer(contents, np.uint8)
     img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
-    # --- Crop hand region ---
+    # Crop hand
     hand_crop = crop_hand(img_rgb)
-
     if hand_crop is None:
-        return {
-            "english": "Unknown",
-            "translated": "",
-            "audio": "",
-            "confidence": 0.0,
-            "language": target_lang
-        }
+        return {"english": "Unknown", "translated": "", "audio": "", "confidence": 0.0, "language": target_lang}
 
-    # --- Resize cropped hand to model input size ---
-    hand_resized = cv2.resize(hand_crop, (IMG_SIZE, IMG_SIZE))
-    hand_input = hand_resized.astype(np.float32) / 255.0
-    hand_input = np.expand_dims(hand_input, axis=0)
-
-    # --- Predict ---
-    predictions = model.predict(hand_input)
-    class_idx = str(np.argmax(predictions[0]))
-    confidence = float(np.max(predictions[0]))
-    english_text = reverse_map.get(class_idx, "Unknown")
-    clean_text = english_text.replace("ASL_", "").replace("ISL_", "")
+    # Run HuggingFace model
+    pil_img = Image.fromarray(hand_crop)
+    inputs  = processor(images=pil_img, return_tensors="pt")
+    with torch.no_grad():
+        logits = model(**inputs).logits
+    probs      = torch.nn.functional.softmax(logits, dim=1).squeeze().tolist()
+    class_idx  = int(torch.argmax(logits, dim=1).item())
+    confidence = float(probs[class_idx])
+    letter     = LABELS.get(str(class_idx), "Unknown")
 
     try:
-        translated = GoogleTranslator(source='en', target=target_lang).translate(clean_text)
+        translated = GoogleTranslator(source='en', target=target_lang).translate(letter)
     except:
-        translated = clean_text
+        translated = letter
 
     try:
-        tts = gTTS(text=translated, lang=target_lang, slow=False)
+        tts    = gTTS(text=translated, lang=target_lang, slow=False)
         buffer = io.BytesIO()
         tts.write_to_fp(buffer)
         buffer.seek(0)
@@ -130,9 +106,9 @@ async def predict(
         audio_b64 = ""
 
     return {
-        "english": clean_text,
+        "english":    letter,
         "translated": translated,
-        "audio": audio_b64,
+        "audio":      audio_b64,
         "confidence": round(confidence * 100, 2),
-        "language": target_lang
+        "language":   target_lang
     }
